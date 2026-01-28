@@ -4,7 +4,43 @@ from pathlib import Path
 from datetime import datetime, date
 from io import BytesIO
 import altair as alt
+def load_gp_list():
+    gp_path = "data/ModalityLewGP_List.xlsx"
 
+    try:
+        df = pd.read_excel(gp_path)
+    except Exception as e:
+        st.warning(f"GP file load error: {e}")
+        return ["Eoghan MacSweeney"]
+
+    # normalize headers
+    df.columns = (
+        df.columns
+        .str.strip()
+        .str.lower()
+        .str.replace(" ", "_")
+        .str.replace("-", "_")
+    )
+
+    # filter by role if present
+    if "role" in df.columns:
+        df["role"] = df["role"].astype(str)
+        df = df[df["role"].str.upper() == "GP"]
+
+    # choose preferred name column
+    if "cliniciandisplay" in df.columns:
+        names = df["cliniciandisplay"].astype(str).str.strip()
+    elif {"first_name", "surname"}.issubset(df.columns):
+        names = df["first_name"].astype(str).str.strip() + " " + df["surname"].astype(str).str.strip()
+    elif "name" in df.columns:
+        names = df["name"].astype(str).str.strip()
+    else:
+        names = df.iloc[:, 0].astype(str).str.strip()
+
+    # cleanup
+    names = names[names != ""].dropna().drop_duplicates().sort_values()
+
+    return names.tolist()
 # ===================== CONFIG =====================
 
 # Base directory for data inside the app (works locally and on Streamlit Cloud)
@@ -488,3 +524,4 @@ with tabs[1]:
             file_name=f"PrivateServices_Report_{date.today()}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
+
