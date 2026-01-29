@@ -51,7 +51,7 @@ def password_gate():
     if st.button("Login"):
         if pw == APP_PASSWORD:
             st.session_state["auth_ok"] = True
-            st.experimental_rerun()
+            st.rerun()
         else:
             st.error("Incorrect password.")
             st.stop()
@@ -691,3 +691,4 @@ with tab_reports:
                 "officedocument.spreadsheetml.sheet"
             ),
         )
+
