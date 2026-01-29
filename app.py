@@ -1,15 +1,19 @@
 # =============================================================
 # Modality Lewisham – Private Services Invoice System (Non-NHS)
-# STABLE VERSION:
-# - Fixes pyarrow dataframe crash (arrow_safe)
-# - Restores clinician dropdown from GP Excel
-# - Full Manage Invoices functionality
+# FINAL STABLE VERSION
+# Tabs:
+# 1) Create Invoice
+# 2) Manage Invoices
+# 3) Tracker (read-only)
+# 4) Reports (date-filtered analytics + exports)
 # =============================================================
 
 from pathlib import Path
 from datetime import datetime, date
+from io import BytesIO
 import pandas as pd
 import streamlit as st
+import altair as alt
 
 st.set_page_config(page_title="Modality Lewisham – Private Services", layout="wide")
 
@@ -27,6 +31,8 @@ TRACKER_PATH = TRACKER_DIR / "Private Services Tracker.xlsx"
 for d in (DATA_DIR, TRACKER_DIR, INVOICE_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
+# ---------------- Password gate ----------------
+
 def password_gate():
     if st.session_state.get("auth_ok"):
         return
@@ -43,6 +49,8 @@ def password_gate():
         st.stop()
 
 password_gate()
+
+# ---------------- Helpers ----------------
 
 def arrow_safe(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -128,11 +136,23 @@ def build_invoice_html(inv, clinician, patient, service, amount):
 </body></html>
 """
 
+def excel_bytes(sheets: dict[str, pd.DataFrame]) -> bytes:
+    bio = BytesIO()
+    with pd.ExcelWriter(bio, engine="openpyxl") as w:
+        for name, df in sheets.items():
+            df.to_excel(w, sheet_name=name[:31], index=False)
+    bio.seek(0)
+    return bio.read()
+
+# ---------------- Load data ----------------
+
 gps = load_gp_list()
 prices = load_price_list()
 tracker = load_tracker()
 
-tab1, tab2, tab3 = st.tabs(["Create Invoice","Manage Invoices","Tracker"])
+tab1, tab2, tab3, tab4 = st.tabs(["Create Invoice","Manage Invoices","Tracker","Reports"])
+
+# ---------------- TAB 1: Create ----------------
 
 with tab1:
     clinician = st.selectbox("Clinician", [""] + gps)
@@ -161,6 +181,8 @@ with tab1:
         }])], ignore_index=True)
         save_tracker(tracker)
         st.download_button("Download invoice", html.encode("utf-8"), file_name=f"{inv}.html")
+
+# ---------------- TAB 2: Manage ----------------
 
 with tab2:
     st.subheader("Sent invoices")
@@ -208,5 +230,88 @@ with tab2:
             html = path.read_text(encoding="utf-8")
             st.download_button("Download existing invoice", html.encode("utf-8"), file_name=path.name)
 
+# ---------------- TAB 3: Tracker ----------------
+
 with tab3:
     st.dataframe(arrow_safe(pd.concat(tracker.values(), ignore_index=True)))
+
+    st.download_button(
+        "Download tracker (Excel)",
+        data=excel_bytes(tracker),
+        file_name=f"Private_Services_Tracker_{date.today().isoformat()}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+# ---------------- TAB 4: Reports ----------------
+
+with tab4:
+    st.subheader("Reports (Paid invoices only)")
+
+    paid = tracker["Paid"].copy()
+    paid["Paid Date"] = pd.to_datetime(paid["Paid Date"], errors="coerce")
+    paid["Amount"] = pd.to_numeric(paid["Amount"], errors="coerce").fillna(0.0)
+
+    if paid["Paid Date"].notna().any():
+        min_d = paid["Paid Date"].min().date()
+        max_d = paid["Paid Date"].max().date()
+    else:
+        min_d = max_d = date.today()
+
+    c1, c2 = st.columns(2)
+    with c1:
+        start_date = st.date_input("From", value=min_d)
+    with c2:
+        end_date = st.date_input("To", value=max_d)
+
+    paid_f = paid[paid["Paid Date"].notna()].copy()
+    paid_f["PaidDateOnly"] = paid_f["Paid Date"].dt.date
+    paid_f = paid_f[(paid_f["PaidDateOnly"] >= start_date) & (paid_f["PaidDateOnly"] <= end_date)]
+
+    st.markdown("### Clinician revenue totals")
+    if paid_f.empty:
+        st.info("No paid invoices in selected date range.")
+    else:
+        totals = paid_f.groupby("Clinician")["Amount"].sum().reset_index()
+        st.dataframe(arrow_safe(totals))
+
+        st.altair_chart(
+            alt.Chart(totals).mark_bar().encode(
+                x=alt.X("Clinician:N", sort="-y"),
+                y="Amount:Q",
+                tooltip=["Clinician","Amount"]
+            ),
+            use_container_width=True
+        )
+
+    st.markdown("### Outstanding invoices")
+    if tracker["Sent"].empty:
+        st.info("No outstanding invoices.")
+    else:
+        st.dataframe(arrow_safe(tracker["Sent"]))
+
+    st.markdown("### Status summary")
+    status_df = pd.DataFrame({
+        "Status": ["Sent","Paid","Cancelled"],
+        "Count": [len(tracker["Sent"]), len(tracker["Paid"]), len(tracker["Cancelled"])]
+    })
+
+    st.altair_chart(
+        alt.Chart(status_df).mark_arc().encode(
+            theta="Count:Q",
+            color="Status:N",
+            tooltip=["Status","Count"]
+        ),
+        use_container_width=True
+    )
+
+    st.download_button(
+        "Download report (Excel)",
+        data=excel_bytes({
+            "Paid (filtered)": paid_f,
+            "Sent": tracker["Sent"],
+            "Cancelled": tracker["Cancelled"],
+            "Status": status_df,
+        }),
+        file_name=f"Private_Services_Report_{start_date}_{end_date}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
