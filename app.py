@@ -1,10 +1,9 @@
 # =============================================================
 # Modality Lewisham – Private Services Invoice System (Non-NHS)
-# MANAGE TAB RESTORED:
-# - Mark as Paid (with payment method)
-# - Reverse payment
-# - Cancel invoice
-# - Re-download existing invoices
+# STABLE VERSION:
+# - Fixes pyarrow dataframe crash (arrow_safe)
+# - Restores clinician dropdown from GP Excel
+# - Full Manage Invoices functionality
 # =============================================================
 
 from pathlib import Path
@@ -31,6 +30,7 @@ for d in (DATA_DIR, TRACKER_DIR, INVOICE_DIR):
 def password_gate():
     if st.session_state.get("auth_ok"):
         return
+    st.title("🔐 Modality Lewisham – Private Services (Non-NHS)")
     pw = st.text_input("Password", type="password")
     if st.button("Login"):
         if pw == APP_PASSWORD:
@@ -44,10 +44,34 @@ def password_gate():
 
 password_gate()
 
+def arrow_safe(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    for col in df.columns:
+        if df[col].dtype == "object":
+            df[col] = df[col].astype(str)
+        if "date" in col.lower():
+            df[col] = pd.to_datetime(df[col], errors="coerce").astype(str)
+    return df.fillna("")
+
 def norm_cols(df):
     df = df.copy()
     df.columns = df.columns.astype(str).str.strip().str.lower().str.replace(" ", "_")
     return df
+
+def load_gp_list():
+    if not GP_PATH.exists():
+        st.warning("GP list missing: data/ModalityLewGP_List.xlsx")
+        return []
+    df = norm_cols(pd.read_excel(GP_PATH))
+    if "role" in df.columns:
+        df = df[df["role"].str.upper() == "GP"]
+    if "cliniciandisplay" in df.columns:
+        names = df["cliniciandisplay"]
+    elif {"first_name","surname"}.issubset(df.columns):
+        names = df["first_name"].astype(str) + " " + df["surname"].astype(str)
+    else:
+        names = df.iloc[:,0].astype(str)
+    return sorted(names.dropna().astype(str).unique().tolist())
 
 def load_price_list():
     if not PRICE_PATH.exists():
@@ -57,11 +81,11 @@ def load_price_list():
     prc = next((c for c in df.columns if "price" in c), None)
     if not svc or not prc:
         return pd.DataFrame(columns=["Service","Price"])
-    out = df[[svc, prc]].copy()
-    out.columns = ["Service","Price"]
-    out["Service"] = out["Service"].astype(str).str.strip()
-    out["Price"] = pd.to_numeric(out["Price"], errors="coerce").fillna(0.0)
-    return out[out["Service"] != ""]
+    out_df = df[[svc, prc]].copy()
+    out_df.columns = ["Service","Price"]
+    out_df["Service"] = out_df["Service"].astype(str).str.strip()
+    out_df["Price"] = pd.to_numeric(out_df["Price"], errors="coerce").fillna(0.0)
+    return out_df[out_df["Service"] != ""]
 
 TRACKER_COLS = [
     "Invoice No","Clinician","Patient","Service","Amount","Status",
@@ -92,19 +116,30 @@ def save_tracker(t):
             v.to_excel(w, sheet_name=k, index=False)
 
 def build_invoice_html(inv, clinician, patient, service, amount):
-    return f"<html><body><h2>Modality Lewisham – Private Services</h2><p>Invoice: {inv}</p><p>Clinician: {clinician}</p><p>Patient: {patient}</p><p>Service: {service}</p><p>Total: £{amount:.2f}</p></body></html>"
+    return f"""
+<html><body style='font-family:Arial'>
+<h2>Modality Lewisham – Private Services</h2>
+<p><b>Invoice:</b> {inv}</p>
+<p><b>Date:</b> {date.today().strftime('%d/%m/%Y')}</p>
+<p><b>Clinician:</b> {clinician}</p>
+<p><b>Patient:</b> {patient}</p>
+<p><b>Service:</b> {service}</p>
+<p><b>Total:</b> £{amount:.2f}</p>
+</body></html>
+"""
 
+gps = load_gp_list()
 prices = load_price_list()
 tracker = load_tracker()
 
 tab1, tab2, tab3 = st.tabs(["Create Invoice","Manage Invoices","Tracker"])
 
 with tab1:
-    clinician = st.text_input("Clinician")
-    patient = st.text_input("Patient")
+    clinician = st.selectbox("Clinician", [""] + gps)
+    patient = st.text_input("Patient name")
     service = st.selectbox("Service", [""] + prices["Service"].tolist())
     default_price = float(prices.loc[prices["Service"]==service,"Price"].iloc[0]) if service in prices["Service"].values else 0.0
-    amount = st.number_input("Amount (£)", value=default_price)
+    amount = st.number_input("Amount (£)", value=default_price, format="%.2f")
 
     if st.button("Generate Invoice"):
         inv = f"INV-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
@@ -129,7 +164,7 @@ with tab1:
 
 with tab2:
     st.subheader("Sent invoices")
-    st.dataframe(tracker["Sent"])
+    st.dataframe(arrow_safe(tracker["Sent"]))
 
     st.subheader("Mark as Paid")
     if not tracker["Sent"].empty:
@@ -144,6 +179,7 @@ with tab2:
             tracker["Sent"] = tracker["Sent"][tracker["Sent"]["Invoice No"]!=inv]
             save_tracker(tracker)
             st.success("Marked as paid")
+            st.rerun()
 
     st.subheader("Cancel invoice")
     active = pd.concat([tracker["Sent"], tracker["Paid"]])
@@ -160,6 +196,7 @@ with tab2:
             tracker["Cancelled"] = pd.concat([tracker["Cancelled"], pd.DataFrame([row])], ignore_index=True)
             save_tracker(tracker)
             st.warning("Invoice cancelled")
+            st.rerun()
 
     st.subheader("Re-download invoice")
     all_inv = pd.concat(tracker.values())
@@ -172,4 +209,4 @@ with tab2:
             st.download_button("Download existing invoice", html.encode("utf-8"), file_name=path.name)
 
 with tab3:
-    st.dataframe(pd.concat(tracker.values(), ignore_index=True))
+    st.dataframe(arrow_safe(pd.concat(tracker.values(), ignore_index=True)))
